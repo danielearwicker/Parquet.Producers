@@ -37,8 +37,8 @@ It is not strictly necessary to have a configurable algorithm for partitioning: 
 Suppose that stage 2 is guaranteed to receive _all_ salaries for the given `age-range` (key-based partitioning), so can safely compute the average of them. The downside is that there may only be ~10 distinct age-ranges and we have 100 nodes available to share work. Second solution:
 
 1. Producer that receives `person` records in arbitrary batches and emits `((age_range, R), salary)` per `person`, where `R` provides the second part of a compound key `(age_range, R)`. `R` is simply a random number between 0 and 9.
-2. Producer that receives an `(age_range, R)` key and a list of `salary` values and emits `(age_range, (count(salary), mean(salary)))`, discarding `R`, but also including the count as well as the mean salary in the output value.
-3. Producer that receives an `age_range` key and list of `(count_salary, mean_salary)` pairs, and emits `(age_range, sum(mean_salary)/sum(count_salary))`, thus finding the final average per age-range.
+2. Producer that receives an `(age_range, R)` key and a list of `salary` values and emits `(age_range, (count(salary), sum(salary)))`, discarding `R`, but also including the count as well as the sum of salaries in the output value.
+3. Producer that receives an `age_range` key and list of `(count_salary, summed_salary)` pairs, and emits `(age_range, sum(summed_salary)/sum(count_salary))`, thus finding the final average per age-range.
 
 Thus by optionally including a partitioning factor in the key, we retain the ability to split work between nodes. Note that the "tricky" part of solving this problem (realising that you can't simply average a set of averages obtained from subsets, and you must know the count per subset as well, i.e. knowing what an associative operator is) is ever-present in classic MapReduce. The concept of a custom partitioner does not solve that problem; it only adds feature-baggage to the framework without enabling any capability that cannot already be solved quite easily in user-space.
 
