@@ -133,11 +133,11 @@ That is, there is no mixing of deletions and upserts for the same key. There is 
 
 To implement this pattern, the framework needs to store more information. The challenge is that a source value $V_t$, which is associated with a source key $K_s$, can contribute to any target pair $(K_t, V_t)$ according to the whim of the author of the `Produce` function.
 
-The following scheme is adopted. The Parquet containing the ultimate result of a producer (known as the _content_) has the logical schema $(T_k, S_k, T_V)$, and is sorted by $(T_k, S_k)$, i.e. by target key and then by source key. So we track which source key produced each target key and value. This alone would be sufficient for an unpredictably expensive solution.
+The following scheme is adopted. The Parquet containing the ultimate result of a producer (known as the _content_) has the logical schema $(K_t, K_s, V_t)$, and is sorted by $(K_t, K_s)$, i.e. by target key and then by source key. So we track which source key produced each target key and value. This alone would be sufficient for an unpredictably expensive solution.
 
-In addition we store a second Parquet file known as the _key-mappings_, with logical schema $(S_k, T_k)$, sorted by $(S_k, T_k)$, i.e. by source key and then by target key, but no values.
+In addition we store a second Parquet file known as the _key-mappings_, with logical schema $(K_s, K_t)$, sorted by $(K_s, K_t)$, i.e. by source key and then by target key, but no values.
 
-The framework is thus able to perform a single-pass parallel scan of all the source data (which is sorted by $S_k$) and the key-mappings (also sorted by $S_k$). It can fast-forward through the key-mappings to find any associated with the current $S_k$ and discover the set of $K_t$ that need to be removed.
+The framework is thus able to perform a single-pass parallel scan of all the source data (which is sorted by $K_s$) and the key-mappings (also sorted by $K_s$). It can fast-forward through the key-mappings to find any associated with the current $K_s$ and discover the set of $K_t$ that need to be removed.
 
 The output of this discovery process, combined with the output of `Produce`, is a set of instructions for how to update the target data. It consists of deletions and "upserts" (inserts or updates).
 
