@@ -194,7 +194,7 @@ This is less simple under incremental merging. The solution has three layers to 
 2. In each feeder, set up a three-way parallel scan between the updated keys, the feeders's content and the feeders's update. For each key in the updated keys, if the feeder has updates for that key, emit them, otherwise emit all the feeder's content for that key _as if they were updates_. The resulting sequence is the _augmented updates_ for the feeder.
 3. Perform a parallel merge across the augmented updates from all the feeders, which is the effective merged update, This layer must take care to emit _either_ a single deletion _or_ one or more upserts per key.
 
-Why does each feeder's augmented updates sequence need to potentially include a mixture of updates and static content? Because when the consuming `Producer` function is fed the values for a key, the list must include all the values for that key.
+Why does each feeder's augmented updates sequence need to potentially include a mixture of updates and static content? Because when the consuming `Produce` function is fed the values for a key, the list must include all the values for that key.
 
 ## Incremental Joins
 
