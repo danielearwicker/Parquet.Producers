@@ -1,0 +1,6 @@
+obj
+bin
+*.parquet
+.vs
+.DS_Store
+nupkg
