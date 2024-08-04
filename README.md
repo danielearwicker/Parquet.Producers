@@ -137,7 +137,7 @@ The following scheme is adopted. The Parquet containing the ultimate result of a
 
 In addition we store a second Parquet file known as the _key-mappings_, with logical schema $(K_s, K_t)$, sorted by $(K_s, K_t)$, i.e. by source key and then by target key, but no values.
 
-The framework is thus able to perform a single-pass parallel scan of all the source data (which is sorted by $K_s$) and the key-mappings (also sorted by $K_s$). It can fast-forward through the key-mappings to find any associated with the current $K_s$ and discover the set of $K_t$ that need to be removed.
+The framework is thus able to perform a single-pass parallel scan of all the incoming update pairs (which are sorted by $K_s$) and the key-mappings (also sorted by $K_s$). It can fast-forward through the key-mappings to find any associated with the current $K_s$ and discover the set of $K_t$ that need to be removed.
 
 The output of this discovery process, combined with the output of `Produce`, is a set of instructions for how to update the target data. It consists of deletions and "upserts" (inserts or updates).
 
