@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parquet.Producers", "Parque
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parquet.Producers.Tests", "Parquet.Producers.Tests\Parquet.Producers.Tests.csproj", "{9472EE68-D0FC-4F28-A715-028C2D61582B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Parquet.Producers.TestCommand", "Parquet.Producers.TestCommand\Parquet.Producers.TestCommand.csproj", "{4810CD5E-9EB0-40C5-AEBE-545FA355894B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{9472EE68-D0FC-4F28-A715-028C2D61582B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9472EE68-D0FC-4F28-A715-028C2D61582B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9472EE68-D0FC-4F28-A715-028C2D61582B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4810CD5E-9EB0-40C5-AEBE-545FA355894B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4810CD5E-9EB0-40C5-AEBE-545FA355894B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4810CD5E-9EB0-40C5-AEBE-545FA355894B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4810CD5E-9EB0-40C5-AEBE-545FA355894B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

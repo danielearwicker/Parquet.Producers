@@ -16,7 +16,8 @@ public sealed class ParquetProductionTests : IDisposable
 
     private class DataStore<SK, SV, TK, TV>(
         Produce<SK, SV, TK, TV> produce,
-        ParquetProductionOptions<SK, TK>? options = null)
+        ParquetProducerPlatformOptions platform,
+        ParquetProducerOptions<SK, TK, TV>? options = null)
         : IDataStore<TK, TV>
     {
         public readonly MemoryStream PreviousMappings = new();
@@ -28,7 +29,7 @@ public sealed class ParquetProductionTests : IDisposable
         public Stream Content => UpdatedContent;
         public Stream Updates => UpdatesMade;
 
-        public readonly ParquetProduction<SK, SV, TK, TV> Production = new(options);
+        public readonly ParquetProduction<SK, SV, TK, TV> Production = new(platform, options);
         
         private static void SwapStreams(Stream previous, Stream updated)
         {
@@ -185,7 +186,7 @@ public sealed class ParquetProductionTests : IDisposable
     {
         var data = new DataStore<int, StuffIn, int, StuffOut>(
             ProjectStuff,
-            new ParquetProductionOptions<int, int>
+            new ParquetProducerPlatformOptions
             {
                 CreateTemporaryStream = CreateTemporaryStream
             });
@@ -291,34 +292,29 @@ public sealed class ParquetProductionTests : IDisposable
     [Test]
     public async Task WordCounting()
     {
+        var platform = new ParquetProducerPlatformOptions
+        {
+            CreateTemporaryStream = CreateTemporaryStream
+        };
         
         var phrasesById = new DataStore<int, string, int, string>(
             SimpleText_Identity, 
-            new ParquetProductionOptions<int, int>
-            {
-                CreateTemporaryStream = CreateTemporaryStream
-            });
+            platform);
         
         var booksById = new DataStore<int, string, int, string>(
             SimpleText_Identity,
-            new ParquetProductionOptions<int, int>
-            {
-                CreateTemporaryStream = CreateTemporaryStream
-            });
+            platform);
         
         var idsByWord = new DataStore<int, string, string, int>(
             SimpleText_SplitIntoWords, 
-            new ParquetProductionOptions<int, string>
-            {
-                CreateTemporaryStream = CreateTemporaryStream
-            });
+            platform);
 
         var wordCounts = new DataStore<string, int, int, string>(
             SimpleText_CountWords,
+            platform,
             new() 
             {
                 TargetKeyComparer = Comparer<int>.Default.Reverse(),
-                CreateTemporaryStream = CreateTemporaryStream
             });
 
         await phrasesById.Update(
@@ -544,5 +540,98 @@ public sealed class ParquetProductionTests : IDisposable
         ];
 
         await wordCounts.AssertContents(expected.Select(x => (x.Count, x.Word, x.Word)).ToArray());
+    }
+
+    public class WordId
+    {
+        public int Id { get; set; }
+    }
+
+    private static async IAsyncEnumerable<(string, WordId)> PreservingValues_Generate(int _, IAsyncEnumerable<string> words)
+    {
+        await foreach (var word in words)
+        {
+            yield return (word, new());
+        }
+    }
+
+    [Test]
+    public async Task PreservingValues()
+    {
+        var platform = new ParquetProducerPlatformOptions
+        {
+            CreateTemporaryStream = CreateTemporaryStream
+        };
+        
+        var nextId = 1;
+
+        var words = new DataStore<int, string, string, WordId>(
+            PreservingValues_Generate, 
+            platform,
+            new()
+            {
+                PreserveKeyValues = (target, example) => target.Id = example?.Id ?? nextId++
+            });
+        
+        await words.Update(
+            new() { Key = 1, Value = "dog" },
+            new() { Key = 1, Value = "budgie" },
+            new() { Key = 2, Value = "dog" },
+            new() { Key = 2, Value = "cat" },
+            new() { Key = 3, Value = "eagle" },
+            new() { Key = 3, Value = "dog" },
+            new() { Key = 3, Value = "cat" });
+
+        await words.AssertContents(
+            ("budgie", 1, new WordId { Id = 1 }),
+            ("cat", 2, new WordId { Id = 2 }),
+            ("cat", 3, new WordId { Id = 2 }),
+            ("dog", 1, new WordId { Id = 3 }),
+            ("dog", 2, new WordId { Id = 3 }),
+            ("dog", 3, new WordId { Id = 3 }),
+            ("eagle", 3, new WordId { Id = 4 }));
+
+        await words.Update(
+            new() { Key = 2, Value = "frog" },
+            new() { Key = 2, Value = "eagle" },
+            new() { Key = 2, Value = "ant" });
+
+        await words.AssertContents(
+            ("ant", 2, new WordId { Id = 5 }),
+            ("budgie", 1, new WordId { Id = 1 }),
+            ("cat", 3, new WordId { Id = 2 }),
+            ("dog", 1, new WordId { Id = 3 }),
+            ("dog", 3, new WordId { Id = 3 }),
+            ("eagle", 2, new WordId { Id = 4 }),
+            ("eagle", 3, new WordId { Id = 4 }),
+            ("frog", 2, new WordId { Id = 6 }));
+
+        await words.Update(
+            new() { Key = 1, Value = "dog" },
+            new() { Key = 1, Value = "frog" });
+
+        await words.AssertContents(
+            ("ant", 2, new WordId { Id = 5 }),
+            ("cat", 3, new WordId { Id = 2 }),
+            ("dog", 1, new WordId { Id = 3 }),
+            ("dog", 3, new WordId { Id = 3 }),
+            ("eagle", 2, new WordId { Id = 4 }),
+            ("eagle", 3, new WordId { Id = 4 }),
+            ("frog", 1, new WordId { Id = 6 }),
+            ("frog", 2, new WordId { Id = 6 }));
+
+        await words.Update(
+            new() { Key = 1, Value = "dog" },
+            new() { Key = 1, Value = "budgie" });
+
+        await words.AssertContents(
+            ("ant", 2, new WordId { Id = 5 }),
+            ("budgie", 1, new WordId { Id = 7 }),
+            ("cat", 3, new WordId { Id = 2 }),
+            ("dog", 1, new WordId { Id = 3 }),
+            ("dog", 3, new WordId { Id = 3 }),
+            ("eagle", 2, new WordId { Id = 4 }),
+            ("eagle", 3, new WordId { Id = 4 }),
+            ("frog", 2, new WordId { Id = 6 }));
     }
 }

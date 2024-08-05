@@ -1,4 +1,7 @@
-﻿namespace Parquet.Producers.Util;
+﻿using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+
+namespace Parquet.Producers.Util;
 
 public class TemporaryStream(string filePath)
     : FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite)
@@ -14,4 +17,3 @@ public class TemporaryStream(string filePath)
         System.IO.File.Delete(name);
     }
 }
-

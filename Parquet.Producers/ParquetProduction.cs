@@ -3,15 +3,19 @@ using Parquet.Producers.Types;
 using Parquet.Producers.Util;
 using System.Runtime.CompilerServices;
 using Parquet.Producers.Parquet;
+using Microsoft.Extensions.Logging;
 
 namespace Parquet.Producers;
 
 public delegate IAsyncEnumerable<(TK Key, TV Value)> 
     Produce<SK, SV, TK, TV>(SK key, IAsyncEnumerable<SV> values);
 
-public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>? options = null)
+public class ParquetProduction<SK, SV, TK, TV>(
+    ParquetProducerPlatformOptions? platform = null,
+    ParquetProducerOptions<SK, TK, TV>? options = null)
 {
-    private ParquetProductionOptions<SK, TK> _options = options ?? new ParquetProductionOptions<SK, TK>();
+    private readonly ParquetProducerPlatformOptions _platform = platform ?? new ParquetProducerPlatformOptions();
+    private readonly ParquetProducerOptions<SK, TK, TV> _options = options ?? new ParquetProducerOptions<SK, TK, TV>();
 
     /// <summary>
     /// Updates a sorted dataset. It is represented by two Parquet tables:
@@ -55,11 +59,11 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
         Stream? targetUpdates = null,
         CancellationToken cancellation = default)
     {
-        using var instructions = new InstructionsStorage<SK, TK, TV>(_options);
+        using var instructions = new InstructionsStorage<SK, TK, TV>(_platform, _options);
 
         var keyMappingsStartPosition = previousKeyMappings.Position;
 
-        var keyMappings = _options.Read<KeyMapping<SK, TK>>(previousKeyMappings, cancellation);
+        var keyMappings = _platform.Read<KeyMapping<SK, TK>>(previousKeyMappings, cancellation);
 
         await GenerateInstructions(keyMappings, sourceUpdates, instructions, production, cancellation);
 
@@ -71,7 +75,7 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             ExecuteInstructionsOnMappings, cancellation);
 
         var updatesWriter = targetUpdates != null
-            ? new BufferedWriter<SourceUpdate<TK, TV>>(targetUpdates, _options.RowsPerGroup, _options.ParquetOptions)
+            ? new BufferedWriter<SourceUpdate<TK, TV>>(targetUpdates, _options.RowsPerGroup, _platform.ParquetOptions)
             : null;
 
         await UpdateStream<ContentRecord<TK, SK, TV>, ContentInstruction<TK, SK, TV>>(
@@ -107,8 +111,8 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
         updatesStream.Position = 0;
         contentStream.Position = 0;
 
-        var updates = _options.Read<SourceUpdate<SK, SV>>(updatesStream, cancellation);
-        var content = _options.Read<ContentRecordFromSource>(contentStream, cancellation);
+        var updates = _platform.Read<SourceUpdate<SK, SV>>(updatesStream, cancellation);
+        var content = _platform.Read<ContentRecordFromSource>(contentStream, cancellation);
 
         await using var updatesEnumerator = updates.GetAsyncEnumerator(cancellation);
         var haveUpdate = await updatesEnumerator.MoveNextAsync();
@@ -190,17 +194,17 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
         }
 
         // Generate a temporary stream of all updated keys across all sources
-        var sourceKeyReaders = sources.Select(source => _options.Read<KeyOnly>(source.Updates, cancellation).Select(x => x.Key)).ToList();
+        var sourceKeyReaders = sources.Select(source => _platform.Read<KeyOnly>(source.Updates, cancellation).Select(x => x.Key)).ToList();
         var affectedKeys = sourceKeyReaders[0].SortedMerge(_options.SourceKeyComparer, sourceKeyReaders.Skip(1).ToArray());
 
-        using var affectedKeysStream = _options.CreateTemporaryStream(_options.LoggingPrefix + ".AffectedKeys");
-        var affectedKeysWriter = new BufferedWriter<KeyOnly>(affectedKeysStream, _options.RowsPerGroup, _options.ParquetOptions);
+        using var affectedKeysStream = _platform.CreateTemporaryStream(_platform.LoggingPrefix + ".AffectedKeys");
+        var affectedKeysWriter = new BufferedWriter<KeyOnly>(affectedKeysStream, _options.RowsPerGroup, _platform.ParquetOptions);
         await affectedKeysWriter.AddRange(affectedKeys
             .DistinctUntilChanged(_options.SourceKeyComparer.ToEqualityComparer())
             .Select(x => new KeyOnly { Key = x }));
         await affectedKeysWriter.Finish();
 
-        var distinctAffectedKeys = _options.Read<KeyOnly>(affectedKeysStream, cancellation).Select(x => x.Key!);
+        var distinctAffectedKeys = _platform.Read<KeyOnly>(affectedKeysStream, cancellation).Select(x => x.Key!);
 
         var sourceReaders = sources.Select(source => ReadKeys(source.Updates, source.Content, distinctAffectedKeys, cancellation)).ToList();
 
@@ -214,7 +218,7 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             var compared = firstOfGroup == null ? 1 : comparer.Compare(update, firstOfGroup);
             if (compared < 0)
             {
-                throw new InvalidOperationException($"{_options.LoggingPrefix}: Update keys are not correctly ordered");
+                throw new InvalidOperationException($"{_platform.LoggingPrefix}: Update keys are not correctly ordered");
             }
             if (compared > 0) // New group
             {
@@ -261,9 +265,9 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
         Func<IAsyncEnumerable<I>, IAsyncEnumerable<R>, IAsyncEnumerable<R>> reconcile,
         CancellationToken cancellation) where R : new()
     {
-        var previousRecords = _options.Read<R>(previousStream, cancellation);
+        var previousRecords = _platform.Read<R>(previousStream, cancellation);
 
-        var updatedContent = new BufferedWriter<R>(updatedStream, rowsPerGroup, _options.ParquetOptions);
+        var updatedContent = new BufferedWriter<R>(updatedStream, rowsPerGroup, _platform.ParquetOptions);
 
         await updatedContent.AddRange(reconcile(instructions, previousRecords));
         await updatedContent.Finish();
@@ -295,6 +299,10 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
 
                 if (compared == 0)
                 {
+                    _platform.VeryNoisyLogger?.LogInformation(
+                            "{LoggingPrefix}: Generated deletion for {TargetKey} from {SourceKey}",
+                            _platform.LoggingPrefix, keyMappingsEnumerator.Current.TargetKey, keyMappingsEnumerator.Current.SourceKey);
+
                     await instructions.Delete(keyMappingsEnumerator.Current.SourceKey,
                                               keyMappingsEnumerator.Current.TargetKey);
                 }
@@ -318,12 +326,12 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
 
                     if (nextKeyCompared == 0)
                     {
-                        throw new InvalidOperationException($"{_options.LoggingPrefix}: Deletion for key {currentKey} was followed by more updates for same key");
+                        throw new InvalidOperationException($"{_platform.LoggingPrefix}: Deletion for key {currentKey} was followed by more updates for same key");
                     }
 
                     if (nextKeyCompared < 0)
                     {
-                        throw new InvalidOperationException($"{_options.LoggingPrefix}: Update keys are not correctly ordered");
+                        throw new InvalidOperationException($"{_platform.LoggingPrefix}: Update keys are not correctly ordered");
                     }
                 }
             }
@@ -336,6 +344,10 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
 
                 await foreach (var projected in production(currentKey!, sequence))
                 {
+                    _platform.VeryNoisyLogger?.LogInformation(
+                            "{LoggingPrefix}: Produced {TargetKey} from {SourceKey}",
+                            _platform.LoggingPrefix, projected.Key, currentKey);
+
                     await instructions.Add(currentKey, projected.Key, projected.Value);
                 }
 
@@ -346,12 +358,12 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
 
                     if (nextKeyCompared == 0)
                     {
-                        throw new InvalidOperationException($"{_options.LoggingPrefix}: Production did not consume all values for the same key");
+                        throw new InvalidOperationException($"{_platform.LoggingPrefix}: Production did not consume all values for the same key");
                     }
 
                     if (nextKeyCompared < 0)
                     {
-                        throw new InvalidOperationException($"{_options.LoggingPrefix}: Source update keys are not correctly ordered");
+                        throw new InvalidOperationException($"{_platform.LoggingPrefix}: Source update keys are not correctly ordered");
                     }
                 }
             }
@@ -392,7 +404,7 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             var compared = firstOfGroup == null ? 1 : compareBothKeys.Compare(next, firstOfGroup.Value);
             if (compared < 0)
             {
-                throw new InvalidOperationException($"{_options.LoggingPrefix}: Instructions are not correctly ordered");
+                throw new InvalidOperationException($"{_platform.LoggingPrefix}: Instructions are not correctly ordered");
             }
 
             if (compared != 0)
@@ -407,12 +419,21 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
 
                     if (!next.In.Deletion)
                     {
+                        _platform.VeryNoisyLogger?.LogInformation(
+                            "{LoggingPrefix}: Replacing key-mapping {SourceKey} -> {TargetKey}",
+                            _platform.LoggingPrefix, next.In.SourceKey, next.In.TargetKey);
+
                         yield return ToMapping(next.In);
-                    }                    
+                    }
                 }
                 else // First is existing mapping so no instructions to modify it
                 {
                     discardExisting = false;
+
+                    _platform.VeryNoisyLogger?.LogInformation(
+                        "{LoggingPrefix}: Retaining existing key-mapping {SourceKey} -> {TargetKey}",
+                        _platform.LoggingPrefix, next.In.SourceKey, next.In.TargetKey);
+
                     yield return ToMapping(next.In);
                 }
             }
@@ -420,6 +441,10 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             {
                 if (!next.In.Deletion)
                 {
+                    _platform.VeryNoisyLogger?.LogInformation(
+                        "{LoggingPrefix}: Continuing key-mapping group {SourceKey} -> {TargetKey}",
+                        _platform.LoggingPrefix, next.In.SourceKey, next.In.TargetKey);
+
                     yield return ToMapping(next.In);
                 }
             }
@@ -477,18 +502,31 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                 targets = sources = ComparisonState.Exhausted;
             }        
         }
-        
+
         CompareCursors();
 
         var updateState = new PendingDeleteState<TK, TV>(updates, tkComparer);
-        
-        var instructionTargetKeys = new InstructionTargetKeys<TK, SK, TV>(instruction, tkComparer);
-        instructionTargetKeys.Store();
-        
-        while (instruction.Valid && existing.Valid)
+
+        var instructionTargetKeys = new MiniDictionary<TK, TV>(tkComparer);
+        if (instruction.Valid)
         {            
+            instructionTargetKeys.Store(instruction.Value.TargetKey, instruction.Value.Value);
+        }
+
+        var existingTargetKeyValues = new MiniDictionary<TK, TV>(tkComparer);
+        if (existing.Valid)
+        {            
+            existingTargetKeyValues.Store(existing.Value.TargetKey, existing.Value.Value);
+        }
+
+        int recordCount = 0;
+
+        while (instruction.Valid && existing.Valid)
+        {
             if (targets == ComparisonState.Equal && sources == ComparisonState.Equal)
             {
+                var exampleValue = existing.Value.Value;
+
                 // Discard previous content with SameTargetAndSource
                 do
                 {
@@ -507,10 +545,16 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                 {
                     if (instruction.Value.Deletion)
                     {
-                        await updateState.SendDelete(instruction.Value.TargetKey);                                                        
+                        _platform.VeryNoisyLogger?.LogInformation(
+                            "{LoggingPrefix}: Deleting content {SourceKey} -> {TargetKey}",
+                            _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey);
+
+                        await updateState.SendDelete(instruction.Value.TargetKey);                                      
                     }
                     else
                     {
+                        _options.PreserveKeyValues?.Invoke(instruction.Value.Value!, exampleValue);
+
                         yield return new ContentRecord<TK, SK, TV>
                         {
                             TargetKey = instruction.Value.TargetKey,
@@ -518,6 +562,10 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                             Value = instruction.Value.Value,
                         };
                         
+                        _platform.VeryNoisyLogger?.LogInformation(
+                            "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
+                            _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
+
                         await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
                     }
 
@@ -542,13 +590,26 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                 {
                     throw new InvalidOperationException("Unexpected deletion for keys with no existing content");
                 }
+
+                var foundExample = existingTargetKeyValues.Matches(instruction.Value.TargetKey, out var example);
                 
+                _options.PreserveKeyValues?.Invoke(instruction.Value.Value!, example);
+
+                if (!foundExample)
+                {
+                    existingTargetKeyValues.Store(instruction.Value.TargetKey, instruction.Value.Value);
+                }
+
                 yield return new ContentRecord<TK, SK, TV>
                 {
                     TargetKey = instruction.Value.TargetKey,
                     SourceKey = instruction.Value.SourceKey,
                     Value = instruction.Value.Value,
                 };
+
+                _platform.VeryNoisyLogger?.LogInformation(
+                    "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
+                    _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
 
                 await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
 
@@ -558,8 +619,12 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             {
                 yield return existing.Value;
 
+                _platform.VeryNoisyLogger?.LogInformation(
+                    "{LoggingPrefix}: Retaining existing content {SourceKey} -> {TargetKey}, {RecordCount} so far",
+                    _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
+
                 // if same target key as either the previous or next instruction, send upserts
-                if (instructionTargetKeys.Matches(existing.Value.TargetKey))
+                if (instructionTargetKeys.Matches(existing.Value.TargetKey, out _))
                 {
                     await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value);
                 }
@@ -568,7 +633,16 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
             }
 
             CompareCursors();
-            instructionTargetKeys.Store();
+
+            if (instruction.Valid)
+            {            
+                instructionTargetKeys.Store(instruction.Value.TargetKey, instruction.Value.Value);
+            }
+
+            if (existing.Valid)
+            {            
+                existingTargetKeyValues.Store(existing.Value.TargetKey, existing.Value.Value);
+            }
         }
 
         // Left-overs
@@ -581,6 +655,15 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                 throw new InvalidOperationException("Unexpected deletion for keys with no existing content");
             }
             
+            var foundExample = existingTargetKeyValues.Matches(instruction.Value.TargetKey, out var example);
+                
+            _options.PreserveKeyValues?.Invoke(instruction.Value.Value!, example);
+
+            if (!foundExample)
+            {
+                existingTargetKeyValues.Store(instruction.Value.TargetKey, instruction.Value.Value);
+            }
+            
             yield return new ContentRecord<TK, SK, TV>
             {
                 TargetKey = instruction.Value.TargetKey,
@@ -588,17 +671,25 @@ public class ParquetProduction<SK, SV, TK, TV>(ParquetProductionOptions<SK, TK>?
                 Value = instruction.Value.Value,
             };
 
+            _platform.VeryNoisyLogger?.LogInformation(
+                "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
+                _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
+
             await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
 
-            await instruction.Next();            
+            await instruction.Next();
         }
 
         while (existing.Valid)
         {
             yield return existing.Value;
 
+            _platform.VeryNoisyLogger?.LogInformation(
+                "{LoggingPrefix}: Retaining existing content {SourceKey} -> {TargetKey}, {RecordCount} so far",
+                _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
+
             // if same target key as either the previous or next instruction, send upserts
-            if (instructionTargetKeys.Matches(existing.Value.TargetKey))
+            if (instructionTargetKeys.Matches(existing.Value.TargetKey, out _))
             {
                 await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value);
             }

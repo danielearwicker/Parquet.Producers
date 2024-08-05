@@ -9,16 +9,17 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
     private readonly MergeSorter<ContentInstruction<TK, SK, TV>> _contentSorter;
     private readonly MergeSorter<KeyMappingInstruction<SK, TK>> _keyMappingSorter;
     
-    private readonly ParquetProductionOptions<SK, TK> _options;
-
-    public InstructionsStorage(ParquetProductionOptions<SK, TK> options)
+    public InstructionsStorage(
+        ParquetProducerPlatformOptions platform, 
+        ParquetProducerOptions<SK, TK, TV> options)
     {
         var contentComparers = Comparers.Build<ContentInstruction<TK, SK, TV>>();
 
         _contentSorter = new(
-            options with 
+            options,
+            platform with 
             { 
-                LoggingPrefix = $"{options.LoggingPrefix}.ContentInstructions"
+                LoggingPrefix = $"{platform.LoggingPrefix}.ContentInstructions"
             },
             contentComparers.By(
                 contentComparers.By(x => x.TargetKey, options.TargetKeyComparer),
@@ -27,15 +28,14 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
         var mappingComparers = Comparers.Build<KeyMappingInstruction<SK, TK>>();
 
         _keyMappingSorter = new(
-            options with
+            options,
+            platform with
             {
-                LoggingPrefix = $"{options.LoggingPrefix}.KeyMappingInstructions"
+                LoggingPrefix = $"{platform.LoggingPrefix}.KeyMappingInstructions"
             },
             mappingComparers.By(
                 mappingComparers.By(x => x.SourceKey, options.SourceKeyComparer),
                 mappingComparers.By(x => x.TargetKey, options.TargetKeyComparer)));
-
-        _options = options;
     }
 
     public ValueTask Delete(SK? sourceKey, TK? targetKey)

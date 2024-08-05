@@ -1,10 +1,13 @@
 ﻿using SuperLinq.Async;
 using Parquet.Serialization;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace Parquet.Producers.Parquet;
 
 public sealed class MergeSorter<T>(
-    ParquetProductionBaseOptions options,
+    ParquetProducerOptions options,
+    ParquetProducerPlatformOptions platform,
     IComparer<T>? Comparer = null) : IDisposable
     where T : new()
 {
@@ -23,16 +26,29 @@ public sealed class MergeSorter<T>(
     {
         if (_buffer.Count == 0) return;
 
+        platform.Logger?.LogInformation("{LoggingPrefix}.MergerSorter: Sorting {Count} records",
+            platform.LoggingPrefix, _buffer.Count);
+
+        var timer = new Stopwatch();
+        timer.Start();
+
         _buffer.Sort(Comparer);
 
-        var stream = options.CreateTemporaryStream($"{options.LoggingPrefix}.MergerSorter[{_batches.Count}]");
+        timer.Stop();
+
+        platform.Logger?.LogInformation("{LoggingPrefix}.MergerSorter: Sorted {Count} records in {Elapsed}",
+            platform.LoggingPrefix, _buffer.Count, timer.Elapsed);
+
+        timer.Restart();
+
+        var stream = platform.CreateTemporaryStream($"{platform.LoggingPrefix}.MergerSorter[{_batches.Count}]");
 
         try
         {
             await ParquetSerializer.SerializeAsync(_buffer, stream, new ParquetSerializerOptions
             {
                 RowGroupSize = options.RowsPerGroup,
-                ParquetOptions = options.ParquetOptions,
+                ParquetOptions = platform.ParquetOptions,
             });
 
             _batches.Add(stream);
@@ -40,8 +56,14 @@ public sealed class MergeSorter<T>(
         }
         finally
         {
-            stream?.Dispose();
+            if (stream != null)
+            {
+                await stream.DisposeAsync();
+            }
         }
+
+        platform.Logger?.LogInformation("{LoggingPrefix}.MergerSorter: Saved sorted batch of {Count} records in {Elapsed}",
+        platform.LoggingPrefix, _buffer.Count, timer.Elapsed);
 
         _buffer.Clear();
     }
@@ -53,7 +75,7 @@ public sealed class MergeSorter<T>(
             batch.Position = 0;
         }
 
-        var batchReaders = _batches.Select(batch => options.Read<T>(batch, cancellation)).ToList();
+        var batchReaders = _batches.Select(batch => platform.Read<T>(batch, cancellation)).ToList();
 
         if (batchReaders.Count == 0) return AsyncEnumerable.Empty<T>();
         if (batchReaders.Count == 1) return batchReaders[0];
