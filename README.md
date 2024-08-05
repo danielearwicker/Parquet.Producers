@@ -196,6 +196,22 @@ This is less simple under incremental merging. The solution has three layers to 
 
 Why does each feeder's augmented updates sequence need to potentially include a mixture of updates and static content? Because when the consuming `Produce` function is fed the values for a key, the list must include all the values for that key.
 
+## Preserving Key Values
+
+In this type of framework keys are usually "natural", being supplied externally. Sometimes it is useful to be able to allocate a surrogate key, such as an incrementing integer or a sequential GUID. This is particularly useful when preparing data for an RDBMS.
+
+The challenge is to augment the source data with extra information, which means that the target data is no longer strictly a pure function of the source, and for information to be preserved across updates. Specifically, the target key $K_t$ should have a persistent relationship with some property of the target value $V_t$.
+
+The solution has to work outside of the `Produce` function, as that executes within a scan in $K_s$ order. Therefore we introduce a separate `PreserveKeyValues` hook that executes later during the $K_v$-ordered scan, and which has a somewhat ugly imperative design. In C# its type is `Action<TV, TV?>`. The first parameter is the value about to be stored in the updated target data, and the second is some randomly chosen value from the previous state associated with the same target key, or else `null` if the key is novel. Example:
+
+```cs
+(target, example) => target.Id = example?.Id ?? nextId++
+```
+
+The above copies an `Id` property or substitutes a new incremented value. (The matter of persisting the counter between updates is currently outside the scope of this framework.)
+
+The upshot is that the affected property (`Id` in the above example) is repeated identically across all rows with the same target key.
+
 ## Incremental Joins
 
 It was noted above that a `Produce` stage can accept multiple sources with different value types, thus acting as a join. This concept also requires revisiting in the face of incremental updates.
