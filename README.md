@@ -120,7 +120,21 @@ It is only possible to replace all values for a given key. That is, if the initi
 
 It follows that the first stage's source should have some level of key granularity or else incremental updating is impossible. Example: we receive daily batches of records. Therefore the date could serve as the key that is associated with all the records in the daily file, so no pre-sorting logic is necessary, but it is then possible to correct all the data for a specific day (or set of days) in a subsequent update.
 
-We also need to be able to delete the values associated with a key, without providing new values. So we extend the input format to be $(K, V?)$ i.e. the $V$ is optional, and the absence of a $V$, as in `('foo', null)`, means that the $K$ `'foo'` has been removed from the input since the previous update.
+We also need to be able to delete the values associated with a key, without providing new values. So we extend the input format to be $(T, K, V)$, where $T$ is the type change described by the record:
+
+-   `Add` - The key is one not present in the source dataset until now
+-   `Update` - The key is being added to the source dataset for the first time
+-   `Delete` - The key (and all its values) are being removed from the source dataset
+
+Ideally we would say the type of an update is one of:
+
+-   $(Add, K, V)$
+-   $(Update, K, V)$
+-   $(Remove, K)$
+
+i.e. the $V$ is omitted for type `Remove`. But our target format, Parquet, is columnar, so there will be a value (e.g. `null`) but it will be ignored by the consumer.
+
+Note that when feeding updates to the framework, it is not necessary to specify `Add` or `Update` correctly; they have the same effect (the reason they exist as separate types of change will be dealt with below.) We can use either of them to describe an "upsert".
 
 To avoid ambiguity, we require that the source data for an incremental update must contain only one of the following per key `k`:
 
@@ -139,7 +153,7 @@ In addition we store a second Parquet file known as the _key-mappings_, with log
 
 The framework is thus able to perform a single-pass parallel scan of all the incoming update pairs (which are sorted by $K_s$) and the key-mappings (also sorted by $K_s$). It can fast-forward through the key-mappings to find any associated with the current $K_s$ and discover the set of $K_t$ that need to be removed.
 
-The output of this discovery process, combined with the output of `Produce`, is a set of instructions for how to update the target data. It consists of deletions and "upserts" (inserts or updates).
+The intermediate output of this discovery process, combined with the output of `Produce`, is a set of internal instructions for how to update the target data. It consists of specific deletions and "upserts" (inserts or updates) that refer not just to the target key, but to the combination of source key and target key.
 
 It is this set of instructions that must be sorted, in contrast to the first implementation that sorted the entire dataset. Two different versions of the instruction set are created, one of $(K_t, K_s, V_t)$ and the other of $(K_s, K_t)$, and then once all the instructions have been produced and sorted, we are ready to produce updated versions of the full content and key-mappings files, which only requires parallel scans.
 
@@ -147,15 +161,15 @@ This design is predicated on these assumptions:
 
 -   Performing forward scans through datasets is a comparatively fast operation
 -   Sorting datasets is a comparatively slow operation
--   Incremental updates will affect a small subset of the keys in each stage
+-   Incremental updates will affect a small subset of the keys in each stage, although they will be scattered unpredictably through the sort order
 
 Therefore it only sorts the intermediate sets of instructions describing how the content and key-mappings are to be updated, for the affected $(K_s, K_t)$ combinations.
 
 That is, suppose the existing data has these content records $(K_t, K_s, V_t)$:
 
--   `(105, 6, 'apple')`
--   `(105, 9, 'banana')`
--   `(108, 4, 'mango)`
+-   `(105, 6, "apple")`
+-   `(105, 9, "banana")`
+-   `(108, 4, "mango)`
 
 And therefore these key-mappings, $(K_s, K_t)$:
 
@@ -165,24 +179,27 @@ And therefore these key-mappings, $(K_s, K_t)$:
 
 The update replaces the values for source key `6`. As the update is scanned in parallel with the key-mappings, we discover that `6` previously produced a target key `105` and so we generate an intermediate instruction to delete `(6, 105)` from the key mappings and to delete `(105, 6, *)` from the content. None of this has any effect on the record that matches `(105, 9, *)`.
 
-An update operation is like a transaction that involves updating every producing stage once. Stages form a directed acylic graph, so the stages that accept external updates are updated first, then the stages that feed from them, and so on through the whole graph. The states of the whole dataset (consisting of multiple producers) can therefore be thought of as a series of versions `1, 2, 3...`. In each version every producer has three parquet files: content, key-mappings and update. To produce version $N + 1$, every stage reads the version $N$ files of itself and its source stages.
+A multi-stage update is like a transaction that involves updating every producing stage once. Producer stages form a directed acylic graph, so the stage that accepts external updates is updated first, then the stages that feed from it, and so on through the whole graph. The states of the whole dataset (consisting of multiple producers) can therefore be thought of as a series of versions `1, 2, 3...`. In each version every producer has three parquet files: content, key-mappings and update. To produce version $N + 1$, every stage reads the version $N$ files of itself and its source stages.
 
 ## Incremental Multiple Stages
 
-It follows that any subsequent processing stages, which maintain their own content and key-mappings from previous updates, do not want to consume the entire dataset from a previous stage. Instead, they want an incremental update in the form of a sequence of $(K, V?)$ where a `null` in $V$ means that the $K$ has been deleted, and otherwise the set of adjacent pairs with the same key includes every value for that key.
+It follows that any subsequent processing stages, which maintain their own content and key-mappings from previous updates, do not want to consume the entire dataset from a previous stage. Instead, they want an incremental update in the form of a sequence of $(T, K, V)$ where the type $T$ indicates whether the change is an upsert or a delete. For a given key, there can _either_ be a single `Delete` change _or_ one or more `Add`/`Update` changes. Also if there has been any change to the set of values for a key, then all the remaining values of that key must appear in the update.
 
-Therefore there is an additional output available from a producing stage, known as the _update_, which is precisely that set of $(K_t, V_t?)$ pairs describing the changes just made to its target content.
+Therefore so that one producer can feed another, there is an additional output available from a producing stage, known as the _update_, which conforms to the $(T, K, V)$ format. The changes are ordered by $K$. Note how the source key of the producer of these updates is irrelevant.
 
-This can be fed into subsequent stages as the $(K_s, V_s)$ so they can incrementally update.
+Although the ability of the type to distinguish between `Add` and `Update` is irrelevant as far as the framework goes when consuming these changes, when generating them into the update Parquet it specifies the type accurately. This makes the update Parquet useful for feeding external processes. Example: an RDBMS table must contain a row for every key in the dataset. This can be achieved by scanning the update Parquet looking for `Add` and `Delete` changes (ignoring `Updates`). In a given wave of changes, a key can only appear as one `Add` or one `Delete`, but never both, making it exceedingly simple to ship these instructions into a pair of SQL set-based operations. Also they will already be sorted, which can help speed up such inserts. If a run of values with the same key appear for the first time, only the first change will have the type `Add`.
 
 Note that this update is not identical to any previously described dataset such as the intermediate instructions. We noted above that if the source key `6` has changed, and the previous content was:
 
--   `(105, 6, 'apple')`
--   `(105, 9, 'banana')`
+-   `(105, 6, "apple")`
+-   `(105, 9, "banana")`
 
 This only requires the intermediate instructions to refer to the row(s) matching `(105, 6, *)`, i.e. with the same source key.
 
-Whereas a subsequent stage needs to be passed the $(K_t, V_t?)$ (the first and third columns) from all the rows matching `(105, *, *)`, because it doesn't care what the previous stage's source keys are (that is an internal detail of the previous stage). It requires the _full_ set of key-value pairs for each affected key.
+Whereas a subsequent stage needs to be passed the first and third columns (target key and value) from all the rows matching `(105, *, *)`, because it doesn't care what the previous stage's source keys are (that is an internal detail of the previous stage). It requires the _full_ set of key-value pairs for each affected key, i.e.:
+
+-   `(Update, 105, "apple")`
+-   `(Update, 105, "banana")`
 
 ## Incremental Merging of Multiple Previous Stages
 
@@ -211,6 +228,8 @@ The solution has to work outside of the `Produce` function, as that executes wit
 The above copies an `Id` property or substitutes a new incremented value. (The matter of persisting the counter between updates is currently outside the scope of this framework.)
 
 The upshot is that the affected property (`Id` in the above example) is repeated identically across all rows with the same target key.
+
+This feature plays well with the idea of syncing keys to an external RDBMS. Suppose the key is some identifier of real-world significance (i.e. a natural key) such as a URL. The above technique may be used to automatically generate a compact integer ID for each distinct URL. Then the update stream can be read to find the `Add` and `Delete` that signal the need to create or remove records from the URL table, which can use the integer ID as the primary key.
 
 ## Incremental Joins
 

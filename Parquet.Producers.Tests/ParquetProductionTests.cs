@@ -97,14 +97,14 @@ public sealed class ParquetProductionTests : IDisposable
                 .Select(x => (x.SourceKey, x.TargetKey))
                 .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
 
-        public async Task AssertUpdates(params (TK, TV, bool Deletion)[] expected)
+        public async Task AssertUpdates(params (TK, TV, SourceUpdateType)[] expected)
             => (await ReadUpdates())
-                .Select(x => (x.Key, x.Value, x.Deletion))
+                .Select(x => (x.Key, x.Value, x.Type))
                 .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
 
-        public async Task AssertSources(IDataStore<SK, SV>[] sources, params (SK, SV, bool Deletion)[] expected)
+        public async Task AssertSources(IDataStore<SK, SV>[] sources, params (SK, SV, SourceUpdateType)[] expected)
             => (await ReadSources(sources).ToListAsync())
-                .Select(x => (x.Key, x.Value, x.Deletion))
+                .Select(x => (x.Key, x.Value, x.Type))
                 .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
     }
 
@@ -250,7 +250,7 @@ public sealed class ParquetProductionTests : IDisposable
             (3, 2));
 
         // Delete source key 2
-        await data.Update(new SourceUpdate<int, StuffIn>() { Key = 2, Deletion = true });
+        await data.Update(new SourceUpdate<int, StuffIn>() { Key = 2, Type = SourceUpdateType.Delete });
 
         await data.AssertContents(
             (1, 1, new StuffOut { Id = 1, FirstFullName = "Randy Newman", Copy = 1 }),
@@ -336,10 +336,10 @@ public sealed class ParquetProductionTests : IDisposable
             (4, 4));
 
         await phrasesById.AssertUpdates(
-            (1, "the quick brown fox", false),
-            (2, "jumps over the lazy dog", false),
-            (3, "sometimes a dog is brown", false),
-            (4, "brown is my favourite colour", false));
+            (1, "the quick brown fox", SourceUpdateType.Add),
+            (2, "jumps over the lazy dog", SourceUpdateType.Add),
+            (3, "sometimes a dog is brown", SourceUpdateType.Add),
+            (4, "brown is my favourite colour", SourceUpdateType.Add));
 
         await booksById.Update(
             new() { Key = 1, Value = "the brain police" },
@@ -358,9 +358,9 @@ public sealed class ParquetProductionTests : IDisposable
             (3, 3));
 
         await booksById.AssertUpdates(
-            (1, "the brain police", false),
-            (2, "sometimes the fox is lazy", false),
-            (3, "the mystery at dog hall", false)
+            (1, "the brain police", SourceUpdateType.Add),
+            (2, "sometimes the fox is lazy", SourceUpdateType.Add),
+            (3, "the mystery at dog hall", SourceUpdateType.Add)
         );
 
         await idsByWord.UpdateFrom(phrasesById, booksById);
@@ -427,7 +427,7 @@ public sealed class ParquetProductionTests : IDisposable
         await wordCounts.AssertContents(expected.Select(x => (x.Count, x.Word, x.Word)).ToArray());
 
         await phrasesById.Update(
-            new SourceUpdate<int, string>() { Key = 2, Deletion = true }); // "jumps over the lazy dog"
+            new SourceUpdate<int, string>() { Key = 2, Type = SourceUpdateType.Delete }); // "jumps over the lazy dog"
 
         await phrasesById.AssertContents(
             (1, 1, "the quick brown fox"),
@@ -440,12 +440,12 @@ public sealed class ParquetProductionTests : IDisposable
             (4, 4));
 
         await phrasesById.AssertUpdates(
-            (2, default!, true));
+            (2, default!, SourceUpdateType.Delete));
 
         booksById.UpdatesMade.SetLength(0);
 
         await idsByWord.AssertSources([phrasesById, booksById], 
-            (2, "sometimes the fox is lazy", false));
+            (2, "sometimes the fox is lazy", SourceUpdateType.Update));
 
         await idsByWord.UpdateFrom(phrasesById, booksById);
 
@@ -481,40 +481,40 @@ public sealed class ParquetProductionTests : IDisposable
             // "jumps over the lazy dog" - will appear as deletions
             // "sometimes the fox is lazy" - will appear as (unnecessary) upserts
         await idsByWord.AssertUpdates(
-            ("dog", 3, false),
-            ("dog", 3, false),
-            ("fox", 1, false),
-            ("fox", 2, false),
-            ("is", 2, false),
-            ("is", 3, false),
-            ("is", 4, false),
-            ("jumps", 0, true),
-            ("lazy", 2, false),
-            ("over", 0, true),
-            ("sometimes", 2, false),
-            ("sometimes", 3, false),
-            ("the", 1, false),
-            ("the", 1, false),
-            ("the", 2, false),
-            ("the", 3, false));
+            ("dog", 3, SourceUpdateType.Update),
+            ("dog", 3, SourceUpdateType.Update),
+            ("fox", 1, SourceUpdateType.Update),
+            ("fox", 2, SourceUpdateType.Update),
+            ("is", 2, SourceUpdateType.Update),
+            ("is", 3, SourceUpdateType.Update),
+            ("is", 4, SourceUpdateType.Update),
+            ("jumps", 0, SourceUpdateType.Delete),
+            ("lazy", 2, SourceUpdateType.Update),
+            ("over", 0, SourceUpdateType.Delete),
+            ("sometimes", 2, SourceUpdateType.Update),
+            ("sometimes", 3, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 2, SourceUpdateType.Update),
+            ("the", 3, SourceUpdateType.Update));
 
         await wordCounts.AssertSources([idsByWord], 
-            ("dog", 3, false),
-            ("dog", 3, false),
-            ("fox", 1, false),
-            ("fox", 2, false),
-            ("is", 2, false),
-            ("is", 3, false),
-            ("is", 4, false),
-            ("jumps", 0, true),
-            ("lazy", 2, false),
-            ("over", 0, true),
-            ("sometimes", 2, false),
-            ("sometimes", 3, false),
-            ("the", 1, false),
-            ("the", 1, false),
-            ("the", 2, false),
-            ("the", 3, false));
+            ("dog", 3, SourceUpdateType.Update),
+            ("dog", 3, SourceUpdateType.Update),
+            ("fox", 1, SourceUpdateType.Update),
+            ("fox", 2, SourceUpdateType.Update),
+            ("is", 2, SourceUpdateType.Update),
+            ("is", 3, SourceUpdateType.Update),
+            ("is", 4, SourceUpdateType.Update),
+            ("jumps", 0, SourceUpdateType.Delete),
+            ("lazy", 2, SourceUpdateType.Update),
+            ("over", 0, SourceUpdateType.Delete),
+            ("sometimes", 2, SourceUpdateType.Update),
+            ("sometimes", 3, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 2, SourceUpdateType.Update),
+            ("the", 3, SourceUpdateType.Update));
 
         await wordCounts.UpdateFrom(idsByWord);
 
@@ -582,6 +582,16 @@ public sealed class ParquetProductionTests : IDisposable
             new() { Key = 3, Value = "dog" },
             new() { Key = 3, Value = "cat" });
 
+        await words.AssertUpdates(
+            ("budgie", new WordId { Id = 1 }, SourceUpdateType.Add),
+            ("cat", new WordId { Id = 2 }, SourceUpdateType.Add),
+            ("cat", new WordId { Id = 2 }, SourceUpdateType.Update),
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Add),
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),
+            ("eagle", new WordId { Id = 4 }, SourceUpdateType.Add)
+        );
+
         await words.AssertContents(
             ("budgie", 1, new WordId { Id = 1 }),
             ("cat", 2, new WordId { Id = 2 }),
@@ -591,10 +601,21 @@ public sealed class ParquetProductionTests : IDisposable
             ("dog", 3, new WordId { Id = 3 }),
             ("eagle", 3, new WordId { Id = 4 }));
 
+        
         await words.Update(
             new() { Key = 2, Value = "frog" },
             new() { Key = 2, Value = "eagle" },
             new() { Key = 2, Value = "ant" });
+
+        await words.AssertUpdates(
+            ("ant", new WordId { Id = 5 }, SourceUpdateType.Add),      // source 2, new target key
+            ("cat", new WordId { Id = 2 }, SourceUpdateType.Update),   // source 3
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),   // source 1
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),   // source 3
+            ("eagle", new WordId { Id = 4 }, SourceUpdateType.Update), // source 2
+            ("eagle", new WordId { Id = 4 }, SourceUpdateType.Update), // source 3
+            ("frog", new WordId { Id = 6 }, SourceUpdateType.Add)      // source 2, new target key
+        );
 
         await words.AssertContents(
             ("ant", 2, new WordId { Id = 5 }),
@@ -610,6 +631,14 @@ public sealed class ParquetProductionTests : IDisposable
             new() { Key = 1, Value = "dog" },
             new() { Key = 1, Value = "frog" });
 
+        await words.AssertUpdates(
+            ("budgie", default!, SourceUpdateType.Delete),
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update),
+            ("frog", new WordId { Id = 6 }, SourceUpdateType.Update),
+            ("frog", new WordId { Id = 6 }, SourceUpdateType.Update)
+        );
+
         await words.AssertContents(
             ("ant", 2, new WordId { Id = 5 }),
             ("cat", 3, new WordId { Id = 2 }),
@@ -623,6 +652,13 @@ public sealed class ParquetProductionTests : IDisposable
         await words.Update(
             new() { Key = 1, Value = "dog" },
             new() { Key = 1, Value = "budgie" });
+
+        await words.AssertUpdates(
+            ("budgie", new WordId { Id = 7 }, SourceUpdateType.Add), // source 1, new target key
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update), // source 1
+            ("dog", new WordId { Id = 3 }, SourceUpdateType.Update), // source 3            
+            ("frog", new WordId { Id = 6 }, SourceUpdateType.Update) // source 2
+        );
 
         await words.AssertContents(
             ("ant", 2, new WordId { Id = 5 }),

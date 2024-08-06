@@ -22,7 +22,7 @@ internal class PendingDeleteState<TK, TV>(
         await updates!.Add(new SourceUpdate<TK, TV>
         {
             Key = _target,
-            Deletion = true,
+            Type = SourceUpdateType.Delete,
         });
     }
 
@@ -63,7 +63,7 @@ internal class PendingDeleteState<TK, TV>(
         }
     }
 
-    public async ValueTask SendUpsert(TK? key, TV? value)
+    public async ValueTask SendUpsert(TK? key, TV? value, SourceUpdateType type)
     {
         if (updates == null) return;
 
@@ -91,6 +91,7 @@ internal class PendingDeleteState<TK, TV>(
         {
             Key = key,
             Value = value,
+            Type = type,
         });
     }
 }

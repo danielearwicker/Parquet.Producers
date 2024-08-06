@@ -154,7 +154,8 @@ public class ParquetProduction<SK, SV, TK, TV>(
                         yield return new SourceUpdate<SK, SV>
                         {
                             Key = currentContent.TargetKey,
-                            Value = currentContent.Value
+                            Value = currentContent.Value,
+                            Type = SourceUpdateType.Update
                         };
                     }
                     else if (compared > 0)
@@ -229,7 +230,7 @@ public class ParquetProduction<SK, SV, TK, TV>(
 
                 firstOfGroup = update;
  
-                if (update.Deletion)
+                if (update.Type == SourceUpdateType.Delete)
                 {
                     groupIsAllDeletions = true;
                     // Hold off on yielding until we know if there are any non-deletions
@@ -242,7 +243,7 @@ public class ParquetProduction<SK, SV, TK, TV>(
             }
             else // 2nd or later update for the same key
             {
-                if (!update.Deletion)
+                if (update.Type != SourceUpdateType.Delete)
                 {
                     groupIsAllDeletions = false;
                     yield return update;
@@ -316,7 +317,7 @@ public class ParquetProduction<SK, SV, TK, TV>(
 
             var currentKey = sourceUpdatesEnumerator.Current.Key;
 
-            if (sourceUpdatesEnumerator.Current.Deletion)
+            if (sourceUpdatesEnumerator.Current.Type == SourceUpdateType.Delete)
             {
                 haveSourceUpdate = await sourceUpdatesEnumerator.MoveNextAsync();
 
@@ -566,7 +567,7 @@ public class ParquetProduction<SK, SV, TK, TV>(
                             "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
                             _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
 
-                        await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
+                        await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value, SourceUpdateType.Update);
                     }
 
                     await instruction.Next();
@@ -611,7 +612,8 @@ public class ParquetProduction<SK, SV, TK, TV>(
                     "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
                     _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
 
-                await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
+                await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value, 
+                                             foundExample ? SourceUpdateType.Update : SourceUpdateType.Add);
 
                 await instruction.Next();
             }
@@ -626,7 +628,7 @@ public class ParquetProduction<SK, SV, TK, TV>(
                 // if same target key as either the previous or next instruction, send upserts
                 if (instructionTargetKeys.Matches(existing.Value.TargetKey, out _))
                 {
-                    await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value);
+                    await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value, SourceUpdateType.Update);
                 }
 
                 await existing.Next();
@@ -675,7 +677,8 @@ public class ParquetProduction<SK, SV, TK, TV>(
                 "{LoggingPrefix}: Upserting content {SourceKey} -> {TargetKey}, {RecordCount} so far",
                 _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
 
-            await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value);
+            await updateState.SendUpsert(instruction.Value.TargetKey, instruction.Value.Value,
+                foundExample ? SourceUpdateType.Update : SourceUpdateType.Add);
 
             await instruction.Next();
         }
@@ -686,12 +689,12 @@ public class ParquetProduction<SK, SV, TK, TV>(
 
             _platform.VeryNoisyLogger?.LogInformation(
                 "{LoggingPrefix}: Retaining existing content {SourceKey} -> {TargetKey}, {RecordCount} so far",
-                _platform.LoggingPrefix, instruction.Value.SourceKey, instruction.Value.TargetKey, ++recordCount);
+                _platform.LoggingPrefix, existing.Value.SourceKey, existing.Value.TargetKey, ++recordCount);
 
             // if same target key as either the previous or next instruction, send upserts
             if (instructionTargetKeys.Matches(existing.Value.TargetKey, out _))
             {
-                await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value);
+                await updateState.SendUpsert(existing.Value.TargetKey, existing.Value.Value, SourceUpdateType.Update);
             }
 
             await existing.Next();
