@@ -2,8 +2,8 @@
 using Parquet.Producers.Types;
 using Parquet.Producers.Util;
 using System.Runtime.CompilerServices;
-using Parquet.Producers.Parquet;
 using Microsoft.Extensions.Logging;
+using Parquet.Producers.Serialization;
 
 namespace Parquet.Producers;
 
@@ -59,11 +59,11 @@ public class ParquetProduction<SK, SV, TK, TV>(
         Stream? targetUpdates = null,
         CancellationToken cancellation = default)
     {
-        using var instructions = new InstructionsStorage<SK, TK, TV>(_platform, _options);
+        using var instructions = new InstructionsStorage<SK, TK, TV>(_platform, _options, cancellation);
 
         var keyMappingsStartPosition = previousKeyMappings.Position;
 
-        var keyMappings = _platform.Read<KeyMapping<SK, TK>>(previousKeyMappings, cancellation);
+        var keyMappings = Read<KeyMapping<SK, TK>>(previousKeyMappings, cancellation);
 
         await GenerateInstructions(keyMappings, sourceUpdates, instructions, production, cancellation);
 
@@ -71,22 +71,27 @@ public class ParquetProduction<SK, SV, TK, TV>(
 
         await UpdateStream<KeyMapping<SK, TK>, KeyMappingInstruction<SK, TK>>(
             _options.RowsPerGroup, previousKeyMappings, updatedKeyMappings,
-            instructions.ReadKeyMappingInstructions(cancellation), 
+            instructions.ReadKeyMappingInstructions(), 
             ExecuteInstructionsOnMappings, cancellation);
 
-        var updatesWriter = targetUpdates != null
-            ? new BufferedWriter<SourceUpdate<TK, TV>>(targetUpdates, _options.RowsPerGroup, _platform.ParquetOptions)
+        var formatWriterForUpdates = targetUpdates != null
+            ? await _options.Format.Write<SourceUpdate<TK, TV>>(targetUpdates)
+            : null;
+
+        var updatesWriter = formatWriterForUpdates != null
+            ? new BufferedWriter<SourceUpdate<TK, TV>>(formatWriterForUpdates, _options.RowsPerGroup, cancellation)
             : null;
 
         await UpdateStream<ContentRecord<TK, SK, TV>, ContentInstruction<TK, SK, TV>>(
             _options.RowsPerGroup, previousContent, updatedContent,
-            instructions.ReadContentInstructions(cancellation), 
+            instructions.ReadContentInstructions(), 
             (inst, prev) => ExecuteInstructionsOnContent(inst, prev, updatesWriter), 
             cancellation);
 
-        if (updatesWriter != null)
+        if (updatesWriter != null && formatWriterForUpdates != null)
         {
             await updatesWriter.Finish();
+            await formatWriterForUpdates.Finish(cancellation);
         }
     }
 
@@ -102,6 +107,21 @@ public class ParquetProduction<SK, SV, TK, TV>(
         public SV? Value;
     }
 
+    public async IAsyncEnumerable<T> Read<T>(Stream stream, [EnumeratorCancellation] CancellationToken cancellation) where T : new()
+    {
+        if (stream.Length == 0) yield break;
+        
+        var reader = await _options.Format.Read<T>(stream);
+        for (var g = 0; g < reader.RowGroupCount; g++)
+        {
+            var group = await reader.Get(g, cancellation);
+            for (var r = 0; r < group.Count; r++)
+            {
+                yield return group[r];
+            }
+        }
+    }
+
     private async IAsyncEnumerable<SourceUpdate<SK, SV>> ReadKeys(
         Stream updatesStream, 
         Stream contentStream, 
@@ -111,8 +131,8 @@ public class ParquetProduction<SK, SV, TK, TV>(
         updatesStream.Position = 0;
         contentStream.Position = 0;
 
-        var updates = _platform.Read<SourceUpdate<SK, SV>>(updatesStream, cancellation);
-        var content = _platform.Read<ContentRecordFromSource>(contentStream, cancellation);
+        var updates = Read<SourceUpdate<SK, SV>>(updatesStream, cancellation);
+        var content = Read<ContentRecordFromSource>(contentStream, cancellation);
 
         await using var updatesEnumerator = updates.GetAsyncEnumerator(cancellation);
         var haveUpdate = await updatesEnumerator.MoveNextAsync();
@@ -195,17 +215,19 @@ public class ParquetProduction<SK, SV, TK, TV>(
         }
 
         // Generate a temporary stream of all updated keys across all sources
-        var sourceKeyReaders = sources.Select(source => _platform.Read<KeyOnly>(source.Updates, cancellation).Select(x => x.Key)).ToList();
+        var sourceKeyReaders = sources.Select(source => Read<KeyOnly>(source.Updates, cancellation).Select(x => x.Key)).ToList();
         var affectedKeys = sourceKeyReaders[0].SortedMerge(_options.SourceKeyComparer, sourceKeyReaders.Skip(1).ToArray());
 
         using var affectedKeysStream = _platform.CreateTemporaryStream(_platform.LoggingPrefix + ".AffectedKeys");
-        var affectedKeysWriter = new BufferedWriter<KeyOnly>(affectedKeysStream, _options.RowsPerGroup, _platform.ParquetOptions);
+        var formatWriter = await _options.Format.Write<KeyOnly>(affectedKeysStream);
+        var affectedKeysWriter = new BufferedWriter<KeyOnly>(formatWriter, _options.RowsPerGroup, cancellation);
         await affectedKeysWriter.AddRange(affectedKeys
             .DistinctUntilChanged(_options.SourceKeyComparer.ToEqualityComparer())
             .Select(x => new KeyOnly { Key = x }));
         await affectedKeysWriter.Finish();
+        await formatWriter.Finish(cancellation);
 
-        var distinctAffectedKeys = _platform.Read<KeyOnly>(affectedKeysStream, cancellation).Select(x => x.Key!);
+        var distinctAffectedKeys = Read<KeyOnly>(affectedKeysStream, cancellation).Select(x => x.Key!);
 
         var sourceReaders = sources.Select(source => ReadKeys(source.Updates, source.Content, distinctAffectedKeys, cancellation)).ToList();
 
@@ -266,9 +288,10 @@ public class ParquetProduction<SK, SV, TK, TV>(
         Func<IAsyncEnumerable<I>, IAsyncEnumerable<R>, IAsyncEnumerable<R>> reconcile,
         CancellationToken cancellation) where R : new()
     {
-        var previousRecords = _platform.Read<R>(previousStream, cancellation);
+        var previousRecords = Read<R>(previousStream, cancellation);
 
-        var updatedContent = new BufferedWriter<R>(updatedStream, rowsPerGroup, _platform.ParquetOptions);
+        var formatWriter = await _options.Format.Write<R>(updatedStream);
+        var updatedContent = new BufferedWriter<R>(formatWriter, rowsPerGroup, cancellation);
 
         await updatedContent.AddRange(reconcile(instructions, previousRecords));
         await updatedContent.Finish();

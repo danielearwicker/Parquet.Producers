@@ -31,6 +31,7 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
     private readonly ParquetProduction<SK, SV, TK, TV> _production;
     private readonly Produce<SK, SV, TK, TV> _produce;
     private readonly ParquetProducerPlatformOptions _basePlatform;
+    
     private readonly ParquetProducerPlatformOptions _platform;
     
     private readonly IPersistentStreams _storage;
@@ -65,14 +66,13 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
         }
     }
 
-    public IProducer<TK2, TV2> Produces<TK2, TV2>(
+    public Producer<TK, TV, TK2, TV2> Produces<TK2, TV2>(
         string name,
         Produce<TK, TV, TK2, TV2> produce,
         ParquetProducerOptions<TK, TK2, TV2>? options = null,
         params IProducer<TK, TV>[] additionalSources)
-            => new Producer<TK, TV, TK2, TV2>(
-                _storage, name, produce, _basePlatform, options, 
-                [.. additionalSources, this]);
+            => new(_storage, name, produce, _basePlatform, options, 
+                    [.. additionalSources, this]);
 
     public void AddTarget(IProducer consumer)
     {
@@ -99,9 +99,9 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
     }
 
     public IAsyncEnumerable<SourceUpdate<TK, TV>> ReadUpdates(CancellationToken cancellation)
-        => _platform.Read<SourceUpdate<TK, TV>>(Updates, cancellation);
+        => _production.Read<SourceUpdate<TK, TV>>(Updates, cancellation);
     
-    private async Task UpdateInternal(IAsyncEnumerable<SourceUpdate<SK, SV>> sourceUpdates, int basedOnVersion, CancellationToken cancellation)
+    public async Task Update(IAsyncEnumerable<SourceUpdate<SK, SV>> sourceUpdates, int basedOnVersion, CancellationToken cancellation)
     {
         using var PreviousMappings = await _storage.OpenRead(Name, PersistentStreamType.KeyMappings, basedOnVersion);
         using var PreviousContent = await _storage.OpenRead(Name, PersistentStreamType.Content, basedOnVersion);
@@ -140,7 +140,7 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
         sequence.Add(producer);
     }
 
-    public async Task Update(IAsyncEnumerable<SourceUpdate<SK, SV>> sourceUpdates, int basedOnVersion, CancellationToken cancellation)
+    private List<IProducer> GetSequence()
     {
         var transitiveTargets = new HashSet<IProducer>();
         CollectTargets(transitiveTargets, this);
@@ -151,14 +151,19 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
             AddToSequence(sequence, target);
         }
 
+        return sequence;
+    }
+
+    public async Task UpdateAll(IAsyncEnumerable<SourceUpdate<SK, SV>> sourceUpdates, int basedOnVersion, CancellationToken cancellation)
+    {
         var timings = new List<(string, TimeSpan)>();
         var timer = new Stopwatch();
 
         timer.Start();
-        await UpdateInternal(sourceUpdates, basedOnVersion, cancellation);
+        await Update(sourceUpdates, basedOnVersion, cancellation);
         timings.Add((Name, timer.Elapsed));
 
-        foreach (var producer in sequence)
+        foreach (var producer in GetSequence())
         {
             timer.Restart();
             await producer.UpdateFromSources(basedOnVersion, cancellation);
@@ -175,12 +180,20 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
                 _platform.LoggingPrefix, TimeSpan.FromSeconds(timings.Sum(x => x.Item2.TotalSeconds)));
     }
 
+    public async Task UpdateTargets(int basedOnVersion, CancellationToken cancellation)
+    {
+        foreach (var producer in GetSequence())
+        {
+            await producer.UpdateFromSources(basedOnVersion, cancellation);
+        }
+    }
+
     public Task UpdateFromSources(int basedOnVersion, CancellationToken cancellation)
     {
         var sourceUpdates = _sources.Count == 1
             ? _sources[0].ReadUpdates(cancellation)
             : _production.ReadSources(Sources.Select(x => (x.Updates, x.Content)).ToArray(), cancellation);
 
-        return UpdateInternal(sourceUpdates, basedOnVersion, cancellation);
+        return Update(sourceUpdates, basedOnVersion, cancellation);
     }
 }

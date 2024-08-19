@@ -14,14 +14,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="MessagePack" Version="2.5.172" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
     <PackageReference Include="Parquet.Net" Version="4.24.0" />
     <PackageReference Include="SuperLinq.Async" Version="6.2.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../README.md" Pack="true" PackagePath=""/>
-    <None Include="../LICENSE" Pack="true" PackagePath=""/>
+    <None Include="../README.md" Pack="true" PackagePath="" />
+    <None Include="../LICENSE" Pack="true" PackagePath="" />
   </ItemGroup>
 
 </Project>

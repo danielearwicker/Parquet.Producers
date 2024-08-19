@@ -1,6 +1,6 @@
 ﻿using Parquet.Producers.Types;
 using Parquet.Producers.Util;
-using Parquet.Producers.Parquet;
+using Parquet.Producers.Serialization;
 
 namespace Parquet.Producers;
 
@@ -11,7 +11,8 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
     
     public InstructionsStorage(
         ParquetProducerPlatformOptions platform, 
-        ParquetProducerOptions<SK, TK, TV> options)
+        ParquetProducerOptions<SK, TK, TV> options,
+        CancellationToken cancellation)
     {
         var contentComparers = Comparers.Build<ContentInstruction<TK, SK, TV>>();
 
@@ -23,7 +24,8 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
             },
             contentComparers.By(
                 contentComparers.By(x => x.TargetKey, options.TargetKeyComparer),
-                contentComparers.By(x => x.SourceKey, options.SourceKeyComparer)));
+                contentComparers.By(x => x.SourceKey, options.SourceKeyComparer)), 
+            cancellation);
 
         var mappingComparers = Comparers.Build<KeyMappingInstruction<SK, TK>>();
 
@@ -35,7 +37,8 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
             },
             mappingComparers.By(
                 mappingComparers.By(x => x.SourceKey, options.SourceKeyComparer),
-                mappingComparers.By(x => x.TargetKey, options.TargetKeyComparer)));
+                mappingComparers.By(x => x.TargetKey, options.TargetKeyComparer)),
+            cancellation);
     }
 
     public ValueTask Delete(SK? sourceKey, TK? targetKey)
@@ -68,11 +71,11 @@ public sealed class InstructionsStorage<SK, TK, TV> : IDisposable
         await _keyMappingSorter.Finish();
     }
 
-    public IAsyncEnumerable<ContentInstruction<TK, SK, TV>> ReadContentInstructions(CancellationToken cancellation) 
-        => _contentSorter.Read(cancellation);
+    public IAsyncEnumerable<ContentInstruction<TK, SK, TV>> ReadContentInstructions() 
+        => _contentSorter.Read();
 
-    public IAsyncEnumerable<KeyMappingInstruction<SK, TK>> ReadKeyMappingInstructions(CancellationToken cancellation)
-        => _keyMappingSorter.Read(cancellation);
+    public IAsyncEnumerable<KeyMappingInstruction<SK, TK>> ReadKeyMappingInstructions()
+        => _keyMappingSorter.Read();
 
     public void Dispose()
     {

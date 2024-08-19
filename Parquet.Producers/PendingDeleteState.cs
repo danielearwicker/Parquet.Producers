@@ -1,5 +1,5 @@
 using Parquet.Producers.Types;
-using Parquet.Producers.Parquet;
+using Parquet.Producers.Serialization;
 
 namespace Parquet.Producers;
 

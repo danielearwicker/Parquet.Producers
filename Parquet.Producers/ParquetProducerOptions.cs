@@ -1,3 +1,6 @@
+using Parquet.Producers.Parquet;
+using Parquet.Producers.Serialization;
+
 namespace Parquet.Producers;
 
 public record ParquetProducerOptions
@@ -5,6 +8,8 @@ public record ParquetProducerOptions
     public int RowsPerGroup { get; set; } = 100_000;
 
     public int GroupsPerBatch { get; set; } = 20;
+
+    public ISerializationFormat Format { get; set; } = new ParquetSerializationFormat(new ParquetOptions());
 }
 
 public record ParquetProducerOptions<SK, TK, TV> : ParquetProducerOptions

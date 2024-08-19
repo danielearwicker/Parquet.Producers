@@ -1,14 +1,15 @@
 ﻿using SuperLinq.Async;
-using Parquet.Serialization;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 
-namespace Parquet.Producers.Parquet;
+namespace Parquet.Producers.Serialization;
 
 public sealed class MergeSorter<T>(
+    
     ParquetProducerOptions options,
     ParquetProducerPlatformOptions platform,
-    IComparer<T>? Comparer = null) : IDisposable
+    IComparer<T>? Comparer,
+    CancellationToken cancellation) : IDisposable
     where T : new()
 {
     private readonly List<T> _buffer = [];
@@ -43,23 +44,23 @@ public sealed class MergeSorter<T>(
 
         var stream = platform.CreateTemporaryStream($"{platform.LoggingPrefix}.MergerSorter[{_batches.Count}]");
 
+        var writer = await options.Format.Write<T>(stream);
+
         try
         {
-            await ParquetSerializer.SerializeAsync(_buffer, stream, new ParquetSerializerOptions
+            for (var i = 0; i < _buffer.Count; i += options.RowsPerGroup)
             {
-                RowGroupSize = options.RowsPerGroup,
-                ParquetOptions = platform.ParquetOptions,
-            });
+                await writer.Add(_buffer.GetRange(i, Math.Min(options.RowsPerGroup, _buffer.Count - i)), cancellation);
+            }
+            
+            await writer.Finish(cancellation);
 
             _batches.Add(stream);
             stream = null;
         }
         finally
         {
-            if (stream != null)
-            {
-                await stream.DisposeAsync();
-            }
+            if (stream != null) await stream.DisposeAsync();
         }
 
         platform.Logger?.LogInformation("{LoggingPrefix}.MergerSorter: Saved sorted batch of {Count} records in {Elapsed}",
@@ -68,14 +69,28 @@ public sealed class MergeSorter<T>(
         _buffer.Clear();
     }
 
-    public IAsyncEnumerable<T> Read(CancellationToken cancellation)
+    private async IAsyncEnumerable<T> ReadBatch(Stream stream)
+    {
+        var reader = await options.Format.Read<T>(stream);
+
+        for (var i = 0; i < reader.RowGroupCount; i++)
+        {
+            var group = await reader.Get(i, cancellation);
+            for (var r = 0; r < group.Count; r++)
+            {
+                yield return group[r];
+            }
+        }
+    }
+
+    public IAsyncEnumerable<T> Read()
     {
         foreach (var batch in _batches)
         {
             batch.Position = 0;
         }
 
-        var batchReaders = _batches.Select(batch => platform.Read<T>(batch, cancellation)).ToList();
+        var batchReaders = _batches.Select(ReadBatch).ToList();
 
         if (batchReaders.Count == 0) return AsyncEnumerable.Empty<T>();
         if (batchReaders.Count == 1) return batchReaders[0];
