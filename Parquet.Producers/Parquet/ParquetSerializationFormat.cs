@@ -5,6 +5,8 @@ namespace Parquet.Producers.Parquet;
 
 public class ParquetSerializationFormat(ParquetOptions options) : ISerializationFormat
 {
+    public string Extension => "parquet";
+
     public async ValueTask<ISerializationReader<T>> Read<T>(Stream stream) where T : new()
         => new ParquetSerializationReader<T>(await ParquetReader.CreateAsync(stream, options));
     

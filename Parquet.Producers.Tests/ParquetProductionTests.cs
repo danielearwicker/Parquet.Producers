@@ -1,11 +1,15 @@
+using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
 using Apache.Arrow.Types;
 using FluentAssertions;
+using MessagePack;
+using Parquet.Producers.MessagePack;
 using Parquet.Producers.Parquet;
 using Parquet.Producers.Serialization;
 using Parquet.Producers.TestCommand;
 using Parquet.Producers.Types;
 using Parquet.Producers.Util;
+using KeyAttribute = MessagePack.KeyAttribute;
 
 namespace Parquet.Producers.Tests;
 
@@ -15,14 +19,14 @@ public sealed class ParquetProductionTests : IDisposable
     {
         private readonly Dictionary<string, byte[]> _blobs = [];
 
-        private static string FullName(string name, PersistentStreamType type, int version)
-            => $"{name}-{type}-{version}";
+        private static string FullName(string name, PersistentStreamType type, int version, string extension)
+            => $"{name}-{type}-{version}.{extension}";
 
-        public async Task<Stream> OpenRead(string name, PersistentStreamType type, int version)
+        public async Task<Stream> OpenRead(string name, PersistentStreamType type, int version, string extension)
         {
             var stream = new MemoryStream();
 
-            if (_blobs.TryGetValue(FullName(name, type, version), out var original))
+            if (_blobs.TryGetValue(FullName(name, type, version, extension), out var original))
             {                
                 await stream.WriteAsync(original);
                 stream.Position = 0; 
@@ -31,21 +35,21 @@ public sealed class ParquetProductionTests : IDisposable
             return stream;
         }
         
-        public async Task Upload(string name, PersistentStreamType type, int version, Stream content, CancellationToken cancellation)
+        public async Task Upload(string name, PersistentStreamType type, int version, string extension, Stream content, CancellationToken cancellation)
         {
             var copy = new MemoryStream();
             await content.CopyToAsync(copy, cancellation);
 
-            _blobs[FullName(name, type, version)] = copy.ToArray();
+            _blobs[FullName(name, type, version, extension)] = copy.ToArray();
         }
     }
 
-    private static readonly ISerializationFormat _format = new ParquetSerializationFormat(new ParquetOptions());
+    private static readonly ISerializationFormat _format = new MessagePackSerializationFormat(MessagePackSerializerOptions.Standard);
 
     private static async Task<List<T>> Read<T>(IPersistentStreams storage, string name, PersistentStreamType type, int version)
         where T : new()
     {
-        using var stream = await storage.OpenRead(name, type, version);
+        using var stream = await storage.OpenRead(name, type, version, _format.Extension);
         if (stream.Length == 0) return [];
 
         var reader = await _format.Read<T>(stream);
@@ -79,11 +83,10 @@ public sealed class ParquetProductionTests : IDisposable
             .Select(x => (x.Key, x.Value, x.Type))
             .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
 
-    // private async Task AssertSources<SK, SV>(IProducer<SK, SV>[] sources, params (SK, SV, SourceUpdateType)[] expected)
-    //     => (await ReadSources(sources).ToListAsync())
-    //         .Select(x => (x.Key, x.Value, x.Type))
-    //         .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
-
+    private async Task AssertSources<SK, SV, TK, TV>(Producer<SK, SV, TK, TV> producer, params (SK, SV, SourceUpdateType)[] expected)
+        => (await producer.ReadUpdatesFromSources(default).ToListAsync())
+            .Select(x => (x.Key, x.Value, x.Type))
+            .Should().BeEquivalentTo(expected, o => o.WithStrictOrdering());
 
     private class TestTempStream(string label) : MemoryStream
     {
@@ -117,21 +120,29 @@ public sealed class ParquetProductionTests : IDisposable
         }
     }
 
+    [MessagePackObject]
     public class StuffIn
     {
+        [Key(0)]
         public string FirstName { get; set; } = string.Empty;
 
+        [Key(1)]
         public string LastName { get; set; } = string.Empty;
 
+        [Key(2)]
         public int Copies { get; set; }
     }
 
+    [MessagePackObject]
     public class StuffOut
     {
+        [Key(0)]
         public int Id { get; set; }
 
+        [Key(1)]
         public string FirstFullName { get; set; } = string.Empty;
 
+        [Key(2)]
         public int Copy { get; set; }
     }
 
@@ -170,6 +181,10 @@ public sealed class ParquetProductionTests : IDisposable
             new ParquetProducerPlatformOptions
             {
                 CreateTemporaryStream = CreateTemporaryStream
+            },
+            new()
+            {
+                Format = _format
             });
 
         await data.UpdateAll(
@@ -302,18 +317,32 @@ public sealed class ParquetProductionTests : IDisposable
             storage,
             "phrasesById",
             SimpleText_Identity, 
-            platform);
+            platform,
+            new()
+            {
+                Format = _format
+            });
         
         var booksById = new Producer<int, string, int, string>(
             storage,
             "booksById",
             SimpleText_Identity,
-            platform);
+            platform,
+            new()
+            {
+                Format = _format
+            });
         
-        var idsByWord = phrasesById.Produces("idsByWord", SimpleText_SplitIntoWords, null, booksById);
+        var idsByWord = phrasesById.Produces("idsByWord", SimpleText_SplitIntoWords,
+            new()
+            {
+                Format = _format
+            }, 
+            booksById);
         
         var wordCounts = idsByWord.Produces("wordCounts", SimpleText_CountWords, new() 
             {
+                Format = _format,
                 TargetKeyComparer = Comparer<int>.Default.Reverse(),
             });
 
@@ -371,7 +400,7 @@ public sealed class ParquetProductionTests : IDisposable
             (3, "the mystery at dog hall", SourceUpdateType.Add)
         );
 
-        await booksById.UpdateTargets(1, default);
+        await booksById.UpdateTargets(0, default);
 
         await AssertContents(storage, "idsByWord", 1,
             ("a", 3, 3),
@@ -452,13 +481,13 @@ public sealed class ParquetProductionTests : IDisposable
         await AssertUpdates<int, string>(storage, "phrasesById", 2,
             (2, default!, SourceUpdateType.Delete));
 
-        // Don't need to do anything to booksById, and it will therefore appear to have
-        // an empty list of updates inversion 2, which is correct.
+        // No changes for booksById
+        booksById.SkipUpdate();
+        
+        await AssertSources(idsByWord, 
+             (2, "sometimes the fox is lazy", SourceUpdateType.Update));
 
-        // await idsByWord.AssertSources([phrasesById, booksById], 
-        //     (2, "sometimes the fox is lazy", SourceUpdateType.Update));
-
-        await booksById.UpdateTargets(2, default);
+        await booksById.UpdateTargets(1, default);
 
         await AssertContents(storage, "idsByWord", 2,
             ("a", 3, 3),
@@ -509,23 +538,23 @@ public sealed class ParquetProductionTests : IDisposable
             ("the", 2, SourceUpdateType.Update),
             ("the", 3, SourceUpdateType.Update));
 
-        // await wordCounts.AssertSources([idsByWord], 
-        //     ("dog", 3, SourceUpdateType.Update),
-        //     ("dog", 3, SourceUpdateType.Update),
-        //     ("fox", 1, SourceUpdateType.Update),
-        //     ("fox", 2, SourceUpdateType.Update),
-        //     ("is", 2, SourceUpdateType.Update),
-        //     ("is", 3, SourceUpdateType.Update),
-        //     ("is", 4, SourceUpdateType.Update),
-        //     ("jumps", 0, SourceUpdateType.Delete),
-        //     ("lazy", 2, SourceUpdateType.Update),
-        //     ("over", 0, SourceUpdateType.Delete),
-        //     ("sometimes", 2, SourceUpdateType.Update),
-        //     ("sometimes", 3, SourceUpdateType.Update),
-        //     ("the", 1, SourceUpdateType.Update),
-        //     ("the", 1, SourceUpdateType.Update),
-        //     ("the", 2, SourceUpdateType.Update),
-        //     ("the", 3, SourceUpdateType.Update));
+        await AssertSources(wordCounts, 
+            ("dog", 3, SourceUpdateType.Update),
+            ("dog", 3, SourceUpdateType.Update),
+            ("fox", 1, SourceUpdateType.Update),
+            ("fox", 2, SourceUpdateType.Update),
+            ("is", 2, SourceUpdateType.Update),
+            ("is", 3, SourceUpdateType.Update),
+            ("is", 4, SourceUpdateType.Update),
+            ("jumps", 0, SourceUpdateType.Delete),
+            ("lazy", 2, SourceUpdateType.Update),
+            ("over", 0, SourceUpdateType.Delete),
+            ("sometimes", 2, SourceUpdateType.Update),
+            ("sometimes", 3, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 1, SourceUpdateType.Update),
+            ("the", 2, SourceUpdateType.Update),
+            ("the", 3, SourceUpdateType.Update));
 
         expected = 
         [
@@ -552,8 +581,10 @@ public sealed class ParquetProductionTests : IDisposable
             expected.Select(x => (x.Count, x.Word, x.Word)).ToArray());
     }
 
+    [MessagePackObject]
     public class WordId
     {
+        [Key(0)]
         public int Id { get; set; }
     }
 
@@ -582,6 +613,7 @@ public sealed class ParquetProductionTests : IDisposable
             },
             new()
             {
+                Format = _format,
                 PreserveKeyValues = (target, example) => target.Id = example?.Id ?? nextId++
             });
 

@@ -5,6 +5,8 @@ namespace Parquet.Producers.MessagePack;
 
 public class MessagePackSerializationFormat(MessagePackSerializerOptions options) : ISerializationFormat
 {
+    public string Extension => "msgpack";
+
     public async ValueTask<ISerializationReader<T>> Read<T>(Stream stream) where T : new()
     {
         stream.Position = stream.Length - sizeof(long);

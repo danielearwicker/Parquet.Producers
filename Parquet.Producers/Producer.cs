@@ -31,7 +31,7 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
     private readonly ParquetProduction<SK, SV, TK, TV> _production;
     private readonly Produce<SK, SV, TK, TV> _produce;
     private readonly ParquetProducerPlatformOptions _basePlatform;
-    
+    private readonly ParquetProducerOptions<SK, TK, TV> _options;
     private readonly ParquetProducerPlatformOptions _platform;
     
     private readonly IPersistentStreams _storage;
@@ -47,8 +47,9 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
         params IProducer<SK, SV>[] sources)
     {
         _basePlatform = platform ?? new ParquetProducerPlatformOptions();
+        _options = options ?? new ParquetProducerOptions<SK, TK, TV>();
         _platform = _basePlatform with { LoggingPrefix = $"{_basePlatform.LoggingPrefix}.{name}" };
-        _production = new(_platform, options ?? new ParquetProducerOptions<SK, TK, TV>());
+        _production = new(_platform, _options);
 
         _storage = storage;
         _produce = produce;
@@ -101,10 +102,19 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
     public IAsyncEnumerable<SourceUpdate<TK, TV>> ReadUpdates(CancellationToken cancellation)
         => _production.Read<SourceUpdate<TK, TV>>(Updates, cancellation);
     
+    public void SkipUpdate()
+    {
+        Updates.SetLength(0);
+    }
+
     public async Task Update(IAsyncEnumerable<SourceUpdate<SK, SV>> sourceUpdates, int basedOnVersion, CancellationToken cancellation)
     {
-        using var PreviousMappings = await _storage.OpenRead(Name, PersistentStreamType.KeyMappings, basedOnVersion);
-        using var PreviousContent = await _storage.OpenRead(Name, PersistentStreamType.Content, basedOnVersion);
+        KeyMappings.SetLength(0);
+        Content.SetLength(0);
+        Updates.SetLength(0);
+
+        using var PreviousMappings = await _storage.OpenRead(Name, PersistentStreamType.KeyMappings, basedOnVersion, _options.Format.Extension);
+        using var PreviousContent = await _storage.OpenRead(Name, PersistentStreamType.Content, basedOnVersion, _options.Format.Extension);
 
         await _production.Update(
             PreviousMappings, KeyMappings,
@@ -113,9 +123,9 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
             Updates, cancellation);
 
         var newVersion = basedOnVersion + 1;
-        await _storage.Upload(Name, PersistentStreamType.KeyMappings, newVersion, KeyMappings, cancellation);
-        await _storage.Upload(Name, PersistentStreamType.Content, newVersion, Content, cancellation);
-        await _storage.Upload(Name, PersistentStreamType.Update, newVersion, Updates, cancellation);
+        await _storage.Upload(Name, PersistentStreamType.KeyMappings, newVersion, _options.Format.Extension, KeyMappings, cancellation);
+        await _storage.Upload(Name, PersistentStreamType.Content, newVersion, _options.Format.Extension, Content, cancellation);
+        await _storage.Upload(Name, PersistentStreamType.Update, newVersion, _options.Format.Extension, Updates, cancellation);
     }
 
     private static void CollectTargets(HashSet<IProducer> transitiveTargets, IProducer producer)
@@ -190,10 +200,12 @@ public sealed class Producer<SK, SV, TK, TV> : IProducer<TK, TV>
 
     public Task UpdateFromSources(int basedOnVersion, CancellationToken cancellation)
     {
-        var sourceUpdates = _sources.Count == 1
+        if (_sources.Count == 0) return Task.CompletedTask;
+        return Update(ReadUpdatesFromSources(cancellation), basedOnVersion, cancellation);
+    }
+
+    public IAsyncEnumerable<SourceUpdate<SK, SV>> ReadUpdatesFromSources(CancellationToken cancellation)
+        => _sources.Count == 1
             ? _sources[0].ReadUpdates(cancellation)
             : _production.ReadSources(Sources.Select(x => (x.Updates, x.Content)).ToArray(), cancellation);
-
-        return Update(sourceUpdates, basedOnVersion, cancellation);
-    }
 }

@@ -4,6 +4,7 @@ using Parquet.Producers.Util;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Parquet.Producers.Serialization;
+using MessagePack;
 
 namespace Parquet.Producers;
 
@@ -74,12 +75,11 @@ public class ParquetProduction<SK, SV, TK, TV>(
             instructions.ReadKeyMappingInstructions(), 
             ExecuteInstructionsOnMappings, cancellation);
 
-        var formatWriterForUpdates = targetUpdates != null
-            ? await _options.Format.Write<SourceUpdate<TK, TV>>(targetUpdates)
-            : null;
-
-        var updatesWriter = formatWriterForUpdates != null
-            ? new BufferedWriter<SourceUpdate<TK, TV>>(formatWriterForUpdates, _options.RowsPerGroup, cancellation)
+        var updatesWriter = targetUpdates != null
+            ? new BufferedWriter<SourceUpdate<TK, TV>>(
+                await _options.Format.Write<SourceUpdate<TK, TV>>(targetUpdates),
+                _options.RowsPerGroup,
+                cancellation)
             : null;
 
         await UpdateStream<ContentRecord<TK, SK, TV>, ContentInstruction<TK, SK, TV>>(
@@ -88,22 +88,27 @@ public class ParquetProduction<SK, SV, TK, TV>(
             (inst, prev) => ExecuteInstructionsOnContent(inst, prev, updatesWriter), 
             cancellation);
 
-        if (updatesWriter != null && formatWriterForUpdates != null)
+        if (updatesWriter != null)
         {
             await updatesWriter.Finish();
-            await formatWriterForUpdates.Finish(cancellation);
         }
     }
 
+
+    [MessagePackObject]
     public class KeyOnly
     {
+        [Key(0)]
         public SK? Key { get; set; }
     }
 
+    [MessagePackObject]
     public class ContentRecordFromSource
     {
+        [Key(1)]
         public SK? TargetKey { get; set; } // Because the target of the production is the source of the next production!
 
+        [Key(2)]
         public SV? Value;
     }
 
@@ -215,18 +220,16 @@ public class ParquetProduction<SK, SV, TK, TV>(
         }
 
         // Generate a temporary stream of all updated keys across all sources
-        var sourceKeyReaders = sources.Select(source => Read<KeyOnly>(source.Updates, cancellation).Select(x => x.Key)).ToList();
+        var sourceKeyReaders = sources.Select(source => Read<SourceUpdate<SK, SV>>(source.Updates, cancellation).Select(x => x.Key)).ToList();
         var affectedKeys = sourceKeyReaders[0].SortedMerge(_options.SourceKeyComparer, sourceKeyReaders.Skip(1).ToArray());
 
         using var affectedKeysStream = _platform.CreateTemporaryStream(_platform.LoggingPrefix + ".AffectedKeys");
-        var formatWriter = await _options.Format.Write<KeyOnly>(affectedKeysStream);
-        var affectedKeysWriter = new BufferedWriter<KeyOnly>(formatWriter, _options.RowsPerGroup, cancellation);
+        var affectedKeysWriter = new BufferedWriter<KeyOnly>(await _options.Format.Write<KeyOnly>(affectedKeysStream), _options.RowsPerGroup, cancellation);
         await affectedKeysWriter.AddRange(affectedKeys
             .DistinctUntilChanged(_options.SourceKeyComparer.ToEqualityComparer())
             .Select(x => new KeyOnly { Key = x }));
         await affectedKeysWriter.Finish();
-        await formatWriter.Finish(cancellation);
-
+        
         var distinctAffectedKeys = Read<KeyOnly>(affectedKeysStream, cancellation).Select(x => x.Key!);
 
         var sourceReaders = sources.Select(source => ReadKeys(source.Updates, source.Content, distinctAffectedKeys, cancellation)).ToList();
